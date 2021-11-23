@@ -10,6 +10,8 @@ function wait(ms) { return new Promise(res => step_timeout(res, ms)); }
 
 // Create URL for WebTransport session.
 function webtransport_url(handler) {
+  // console.log(handler)
+  // console.log(`${BASE}/webtransport/handlers/${handler}`)
   return `${BASE}/webtransport/handlers/${handler}`;
 }
 
@@ -25,17 +27,17 @@ function webtransport_code_to_http_code(n) {
 async function read_stream_as_string(readable_stream) {
   const decoder = new TextDecoderStream();
   const decode_stream = readable_stream.pipeThrough(decoder);
-  const reader = decode_stream.getReader();
+  const datagramReader = decode_stream.getdatagramReader();
 
   let chunks = '';
   while (true) {
-    const {value: chunk, done} = await reader.read();
+    const {value: chunk, done} = await datagramReader.read();
     if (done) {
       break;
     }
     chunks += chunk;
   }
-  reader.releaseLock();
+  datagramReader.releaseLock();
 
   return chunks;
 }
@@ -68,9 +70,9 @@ async function query(token) {
   try {
     await wt.ready;
     const streams = await wt.incomingUnidirectionalStreams;
-    const streams_reader = streams.getReader();
-    const { value: readable } = await streams_reader.read();
-    streams_reader.releaseLock();
+    const streams_datagramReader = streams.getdatagramReader();
+    const { value: readable } = await streams_datagramReader.read();
+    streams_datagramReader.releaseLock();
 
     return await read_stream_as_json(readable);
   } finally {

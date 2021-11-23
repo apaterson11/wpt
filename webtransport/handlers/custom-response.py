@@ -1,7 +1,11 @@
 from urllib.parse import urlsplit, parse_qsl
+import logging
 
 
 def connect_received(request_headers, response_headers):
+    # _logger: logging.Logger = logging.getLogger(__name__)
+    # _logger.info("request headers: %s", request_headers)
+    # print(request_headers)
     for data in request_headers:
         if data[0] == b':path':
             path = data[1].decode('utf-8')

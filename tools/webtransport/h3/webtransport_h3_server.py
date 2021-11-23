@@ -4,8 +4,11 @@ import os
 import ssl
 import threading
 import traceback
+import struct
+import numpy as np
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, Tuple
+from functools import reduce
 
 # TODO(bashi): Remove import check suppressions once aioquic dependency is resolved.
 from aioquic.buffer import Buffer  # type: ignore
@@ -35,6 +38,34 @@ SERVER_NAME = 'webtransport-h3-server'
 _logger: logging.Logger = logging.getLogger(__name__)
 _doc_root: str = ""
 
+connections = []
+
+class DataView:
+    def __init__(self, array, bytes_per_element=1):
+        """
+        bytes_per_element is the size of each element in bytes.
+        By default we are assume the array is one byte per element.
+        """
+        self.array = array
+        self.bytes_per_element = 1  # because writeBuffer is uint8 array
+
+    def __get_binary(self, start_index, byte_count, signed=False):
+        integers = [self.array[start_index + x] for x in range(byte_count)]
+        bytes = [integer.to_bytes(self.bytes_per_element, byteorder='big', signed=False) for integer in integers]
+        return reduce(lambda a, b: a + b, bytes)
+
+    def get_uint_32(self, start_index):
+        bytes_to_read = 4
+        return int.from_bytes(self.__get_binary(start_index, bytes_to_read), byteorder='big')   # fucking big endian!!!!!!!!
+
+def parse(array):
+    dv = DataView(array)
+    return {
+        "streamId": dv.get_uint_32(0),
+        "sequenceNumber": dv.get_uint_32(4),
+        "ts": dv.get_uint_32(8),
+        "eof": dv.get_uint_32(12),
+    }
 
 class H3ConnectionWithDatagram04(H3Connection):
     """
@@ -106,9 +137,12 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
             for header, value in event.headers:
                 headers[header] = value
 
+            _logger.info(event)
+
+            _logger.info("event received")
             method = headers.get(b":method")
             protocol = headers.get(b":protocol")
-            if method == b"CONNECT" and protocol == b"webtransport":
+            if method == b"CONNECT" and protocol == b"webtransport":    # client connects
                 self._session_stream_id = event.stream_id
                 self._handshake_webtransport(event, headers)
             else:
@@ -131,7 +165,8 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
                 if self._allow_datagrams:
                     self._handler.datagram_received(data=event.data)
 
-    def _receive_data_on_session_stream(self, data: bytes, fin: bool) -> None:
+    def _receive_data_on_session_stream(self, data: bytes, fin: bool) -> None:  # what is this?
+        _logger.info("INTERESTING")
         self._capsule_decoder_for_session_stream.append(data)
         if fin:
             self._capsule_decoder_for_session_stream.final()
@@ -167,6 +202,7 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
             elif capsule.type == CapsuleType.CLOSE_WEBTRANSPORT_SESSION:
                 buffer = Buffer(data=capsule.data)
                 code = buffer.pull_uint32()
+                # _logger.info("CODE, %s", code)
                 # 4 bytes for the uint32.
                 reason = buffer.pull_bytes(len(capsule.data) - 4)
                 # TODO(yutakahirano): Make sure `reason` is a UTF-8 text.
@@ -184,7 +220,9 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
 
     def _handshake_webtransport(self, event: HeadersReceived,
                                 request_headers: Dict[bytes, bytes]) -> None:
+        _logger.info("test")
         assert self._http is not None
+        _logger.info("REQUEST HEADERS: %s", request_headers)
         path = request_headers.get(b":path")
         if path is None:
             # `:path` must be provided.
@@ -193,9 +231,11 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
 
         # Create a handler using `:path`.
         try:
+            _logger.info("SESSION ID: %d", event.stream_id)
             self._handler = self._create_event_handler(
                 session_id=event.stream_id,
-                path=path,
+                path= b'/webtransport/handlers/custom-response.py?:status=200', # messy workaround, used to be path=path
+                # path = path,
                 request_headers=event.headers)
         except IOError:
             self._send_error_response(event.stream_id, 404)
@@ -208,6 +248,7 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
         self._handler.connect_received(response_headers=response_headers)
 
         status_code = None
+        _logger.info("RESPONSE HEADERS: %s", response_headers)
         for name, value in response_headers:
             if name == b":status":
                 status_code = value
@@ -228,6 +269,9 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
         with open(file_path) as f:
             exec(compile(f.read(), path, "exec"), callbacks)
         session = WebTransportSession(self, session_id, request_headers)
+        connections.append(session)
+        _logger.info("-------------------------------------")
+        _logger.info("CONNECTIONS: %s", str(session_id))
         return WebTransportEventHandler(session, callbacks)
 
     def _call_session_closed(
@@ -303,6 +347,7 @@ class WebTransportSession:
         # TODO(yutakahirano): Implement the above.
 
     def create_unidirectional_stream(self) -> int:
+        _logger.info("created unidirectional stream")
         """
         Create a unidirectional WebTransport stream and return the stream ID.
         """
@@ -310,11 +355,13 @@ class WebTransportSession:
             session_id=self.session_id, is_unidirectional=True)
 
     def create_bidirectional_stream(self) -> int:
+        _logger.info("created bidirectional stream")
         """
         Create a bidirectional WebTransport stream and return the stream ID.
         """
         stream_id = self._http.create_webtransport_stream(
             session_id=self.session_id, is_unidirectional=False)
+        _logger.info("STREAM ID: %d", stream_id)
         # TODO(bashi): Remove this workaround when aioquic supports receiving
         # data on server-initiated bidirectional streams.
         stream = self._http._get_or_create_stream(stream_id)
@@ -335,9 +382,13 @@ class WebTransportSession:
         :param data: The data to send.
         :param end_stream: If set to True, the stream will be closed.
         """
+        # _logger.info("stream data received")
+        # _logger.info("END_STREAM: %s", end_stream)
+        #_logger.info("conneciton stream_id vs standard one: %d %d", self._protocol._session_stream_id, stream_id)
         self._http._quic.send_stream_data(stream_id=stream_id,
                                           data=data,
                                           end_stream=end_stream)
+        # _logger.info("stream data sent on")
 
     def send_datagram(self, data: bytes) -> None:
         """
@@ -358,6 +409,8 @@ class WebTransportSession:
             # Chrome always use 0 for the initial stream and the initial flow
             # ID, we cannot check the correctness with it.
             flow_id = self._protocol._session_stream_id // 4
+        # _logger.info("connection stream_id vs standard one: %d", flow_id)
+        # _logger.info(type(flow_id))
         self._http.send_datagram(flow_id=flow_id, data=data)
 
     def stop_stream(self, stream_id: int, code: int) -> None:
@@ -401,10 +454,22 @@ class WebTransportEventHandler:
 
     def stream_data_received(self, stream_id: int, data: bytes,
                              stream_ended: bool) -> None:
-        self._run_callback("stream_data_received", self._session, stream_id,
+        result = parse(data)
+        _logger.info("CODE, %s", result['streamId'])
+        for connection in connections:
+            if connection != self._session:
+                WebTransportSession.send_stream_data(connection, result['streamId'], data, stream_ended)                    
+        self._run_callback("stream_data_received", self._session, result['streamId'],
                            data, stream_ended)
 
     def datagram_received(self, data: bytes) -> None:
+        # array = bytearray(data)
+        result = parse(data)
+        # _logger.info("DATAGRAM RECEIVED")
+        _logger.info("CODE, %s", result)
+        for connection in connections:
+            if connection != self._session:
+                WebTransportSession.send_datagram(connection, data)
         self._run_callback("datagram_received", self._session, data)
 
     def session_closed(
@@ -457,6 +522,8 @@ class WebTransportH3Server:
         global _logger
         if logger is not None:
             _logger = logger
+
+        _logger.info("cert path %s", self.cert_path)
 
     def start(self) -> None:
         """Start the server."""
