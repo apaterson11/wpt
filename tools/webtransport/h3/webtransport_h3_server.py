@@ -41,6 +41,8 @@ _doc_root: str = ""
 
 connections = []
 streamIds = []
+global counter
+counter = 0
 
 class DataView:
     def __init__(self, array, bytes_per_element=1):
@@ -133,6 +135,7 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
                 self._handler.stream_reset(event.stream_id, event.error_code)
 
     def _h3_event_received(self, event: H3Event) -> None:
+        global counter
         if isinstance(event, HeadersReceived):
             _logger.info("event received")
             # Convert from List[Tuple[bytes, bytes]] to Dict[bytes, bytes].
@@ -160,6 +163,8 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
                 event.data, event.stream_ended)
         elif self._handler is not None:
             if isinstance(event, WebTransportStreamDataReceived):
+                if (len(streamIds) < 2):
+                    streamIds.append(event.stream_id)
                 self._handler.stream_data_received(
                     stream_id=event.stream_id,
                     data=event.data,
@@ -269,7 +274,7 @@ class WebTransportH3Protocol(QuicConnectionProtocol):
         callbacks = {"__file__": file_path}
         with open(file_path) as f:
             exec(compile(f.read(), path, "exec"), callbacks)
-        session = WebTransportSession(self, session_id, request_headers)
+        session = WebTransportSession(self, counter, request_headers)
         connections.append(session)
         _logger.info("-------------------------------------")
         _logger.info("CONNECTIONS: %s", connections)
@@ -462,32 +467,18 @@ class WebTransportEventHandler:
         # self._session_stream_id = result['streamId']
 
         if (result['streamId'] == 1 or result['streamId'] == 2):
-            _logger.info("stream id: %s", result['streamId'])        
+            #_logger.info("stream id: %s", result['streamId'])        
 
-            for connection in connections:
+            for idx, connection in enumerate(connections):
                 if connection != self._session:
                     if (self._session.stream_is_unidirectional(stream_id)):
                         pass
                         # _logger.info("Stream is unidirectional cannot send data")
                     else:
-                        # _logger.info("bruh moment: %s", connections[connection])
-                        self._session.send_stream_data(stream_id, data, stream_ended)                    
-                        self._run_callback("stream_data_received", self, stream_id, data, stream_ended)
-
-        # else:
-        #     _logger.info("pass")
-        #     pass
-
-        # for connection in connections:
-        #     if connection == connections[0] and len(streamIds) > 1:
-        #         WebTransportSession.send_stream_data(connection, streamIds[1], data, stream_ended)
-        #         self._run_callback("stream_data_received", self._session, self._session_stream_id,
-        #                        data, stream_ended)
-        #     elif connection == connections[1]:
-        #         WebTransportSession.send_stream_data(connection, streamIds[0], data, stream_ended)
-        #         self._run_callback("stream_data_received", self._session, self._session_stream_id,
-        #                         data, stream_ended)
-
+                        #_logger.info("bruh moment: %s %s %s", idx, streamIds[len(streamIds)-1-idx], stream_id)
+                        #self._session.send_stream_data(stream_id, data, stream_ended)  
+                        connection.send_stream_data(stream_id, data, stream_ended)                    
+                        self._run_callback("stream_data_received", stream_id, data, stream_ended)
 
     def datagram_received(self, data: bytes) -> None:
         # array = bytearray(data)
